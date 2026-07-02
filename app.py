@@ -136,7 +136,7 @@ def _fft_utils(np):
 
 
 @app.cell
-def _plotting(Circle, np, plt):
+def _plotting(Circle, mo, np, plt):
     def _phase_with_alpha(field, gamma=0.6):
         """Render complex field's phase, alpha-masked by normalized magnitude."""
         mag = np.abs(field)
@@ -210,7 +210,18 @@ def _plotting(Circle, np, plt):
             axes[1].add_patch(ring)
         return fig
 
-    return three_pane, two_pane
+    def show_fig(fig):
+        """Render a matplotlib figure as a static PNG and release it.
+
+        Static rendering is far lighter than mo.mpl.interactive in the
+        WASM build, and closing the figure keeps figures from piling up
+        across interactions (a real per-session memory/perf leak).
+        """
+        html = mo.as_html(fig)
+        plt.close(fig)
+        return html
+
+    return show_fig, three_pane, two_pane
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +425,6 @@ def _header(mo):
         regions don't show random-phase confetti.
         """
     )
-    header
     return (header,)
 
 
@@ -447,7 +457,6 @@ def _t1w1_controls(PRESETS, mo):
         mo.hstack([t1w1_scale, t1w1_rot]),
         mo.hstack([t1w1_add, t1w1_preset_b]),
     ])
-    t1w1_controls
     return (
         t1w1_add,
         t1w1_controls,
@@ -502,8 +511,7 @@ def _t1w1_plot(
                      if _mode == "magnitude" else "FT phase (cyclic)"),
         log_right=(_mode == "magnitude"),
     )
-    t1w1_plot = mo.mpl.interactive(_fig)
-    t1w1_plot
+    t1w1_plot = show_fig(_fig)
     return (t1w1_plot,)
 
 
@@ -550,7 +558,6 @@ def _t1w1_prompts(mo):
             ),
         }),
     ])
-    t1w1_prompts
     return (t1w1_prompts,)
 
 
@@ -579,7 +586,6 @@ def _t1w2_controls(PRESETS, mo):
         ),
         mo.hstack([t1w2_a, t1w2_b]),
     ])
-    t1w2_controls
     return t1w2_a, t1w2_b, t1w2_controls
 
 
@@ -624,7 +630,7 @@ def _t1w2_plot(
     for _a in _ax.ravel():
         _a.set_xticks([])
         _a.set_yticks([])
-    t1w2_plot = mo.mpl.interactive(_fig)
+    t1w2_plot = show_fig(_fig)
     t1w2_explain = mo.accordion({
         "Reveal the takeaway": mo.md(
             "The reconstruction follows the **phase**, not the magnitude. "
@@ -636,7 +642,6 @@ def _t1w2_plot(
             "image throws phase away, but FPM gets it back."
         ),
     })
-    mo.vstack([t1w2_plot, t1w2_explain])
     return t1w2_explain, t1w2_plot
 
 
@@ -660,7 +665,6 @@ def _t1w3_controls(PRESETS, mo):
         mo.md("**Widget 3 — Convolution theorem (light touch).**"),
         mo.hstack([t1w3_obj, t1w3_kernel, t1w3_radius]),
     ])
-    t1w3_controls
     return t1w3_controls, t1w3_kernel, t1w3_obj, t1w3_radius
 
 
@@ -712,7 +716,7 @@ def _t1w3_plot(
     for _a in _ax.ravel():
         _a.set_xticks([])
         _a.set_yticks([])
-    t1w3_plot = mo.mpl.interactive(_fig)
+    t1w3_plot = show_fig(_fig)
     t1w3_caption = mo.md(
         r"""
         **Convolution in space = multiplication in frequency.** The bottom row
@@ -723,7 +727,6 @@ def _t1w3_plot(
         convolving the object with the pupil's inverse transform (the PSF).
         """
     )
-    mo.vstack([t1w3_plot, t1w3_caption])
     return t1w3_caption, t1w3_plot
 
 
@@ -775,7 +778,6 @@ def _t2a_controls(mo):
         mo.md("**Stage A — One object point → its far field.**"),
         mo.hstack([t2a_x, t2a_y, t2a_view]),
     ])
-    t2a_controls
     return t2a_controls, t2a_view, t2a_x, t2a_y
 
 
@@ -797,7 +799,7 @@ def _t2a_plot(N_LIVE, ft, mo, np, t2a_view, t2a_x, t2a_y, two_pane):
                      else "far-field |F| (uniform)"),
         log_right=False,
     )
-    t2a_plot = mo.mpl.interactive(_fig)
+    t2a_plot = show_fig(_fig)
     t2a_caption = mo.md(
         r"""
         **What to notice.** The far-field **magnitude is uniform** — a point's
@@ -808,7 +810,6 @@ def _t2a_plot(N_LIVE, ft, mo, np, t2a_view, t2a_x, t2a_y, two_pane):
         ramp on the *object*, which shifts the *spectrum*.
         """
     )
-    mo.vstack([t2a_plot, t2a_caption])
     return t2a_caption, t2a_plot
 
 
@@ -838,7 +839,6 @@ def _t2b_controls(mo):
         mo.hstack([t2b_n, t2b_sep, t2b_view]),
         mo.hstack([t2b_amp_spread, t2b_phase_spread]),
     ])
-    t2b_controls
     return (
         t2b_amp_spread,
         t2b_controls,
@@ -889,7 +889,7 @@ def _t2b_plot(
                      if _mode == "magnitude" else "phase"),
         log_right=False,
     )
-    t2b_plot = mo.mpl.interactive(_fig)
+    t2b_plot = show_fig(_fig)
     t2b_caption = mo.md(
         r"""
         **What to notice.** Each point contributes a ramp; their **sum** is the
@@ -903,7 +903,6 @@ def _t2b_plot(
         the object**.
         """
     )
-    mo.vstack([t2b_plot, t2b_caption])
     return t2b_caption, t2b_plot
 
 
@@ -931,7 +930,6 @@ def _t2c_controls(mo):
         ),
         mo.hstack([t2c_preset, t2c_NA]),
     ])
-    t2c_controls
     return t2c_NA, t2c_controls, t2c_preset
 
 
@@ -972,7 +970,7 @@ def _t2c_plot(
         pupil_radius_px=_cutoff_px,
         log_middle=True,
     )
-    t2c_plot = mo.mpl.interactive(_fig)
+    t2c_plot = show_fig(_fig)
     t2c_caption = mo.md(
         rf"""
         **What to notice.** As NA shrinks the cyan pupil ring tightens,
@@ -992,7 +990,6 @@ def _t2c_plot(
         pixels** of the {_N}×{_N} spectrum.
         """
     )
-    mo.vstack([t2c_plot, t2c_caption])
     return t2c_caption, t2c_plot
 
 
@@ -1032,7 +1029,6 @@ def _t3w1_controls(ILLUM_NA_MAX, mo):
         mo.hstack([t3w1_obj, t3w1_NA, t3w1_view]),
         mo.hstack([t3w1_NAill_x, t3w1_NAill_y]),
     ])
-    t3w1_controls
     return (
         t3w1_NA,
         t3w1_NAill_x,
@@ -1099,7 +1095,7 @@ def _t3w1_plot(
         pupil_radius_px=_cutoff_px,
         log_middle=True,
     )
-    t3w1_plot = mo.mpl.interactive(_fig)
+    t3w1_plot = show_fig(_fig)
     t3w1_caption = mo.md(
         rf"""
         **What to notice.** As you slide illumination NA: the object spectrum
@@ -1115,7 +1111,6 @@ def _t3w1_plot(
         spectrum.
         """
     )
-    mo.vstack([t3w1_plot, t3w1_caption])
     return t3w1_caption, t3w1_plot
 
 
@@ -1153,7 +1148,6 @@ def _t3w2_controls(mo):
         mo.hstack([t3w2_obj, t3w2_NA, t3w2_NA_ill_max]),
         mo.hstack([t3w2_grid_side, t3w2_r_active]),
     ])
-    t3w2_controls
     return (
         t3w2_NA,
         t3w2_NA_ill_max,
@@ -1253,7 +1247,7 @@ def _t3w2_plot(
     _ax[2].set_title("achievable resolution preview", fontsize=10)
     _ax[2].set_xticks([])
     _ax[2].set_yticks([])
-    t3w2_plot = mo.mpl.interactive(_fig)
+    t3w2_plot = show_fig(_fig)
 
     # Synthetic NA estimate
     _syn_NA = t3w2_NA.value + (_r_act / max(_center, 1)) * _NA_max
@@ -1276,7 +1270,6 @@ def _t3w2_plot(
         a struggle.
         """
     )
-    mo.vstack([t3w2_plot, t3w2_caption])
     return t3w2_caption, t3w2_plot
 
 
@@ -1352,17 +1345,16 @@ def _t4_controls(LED_GRID_SIDE, LED_SPACING_PX_DEFAULT, mo):
         value=LED_GRID_SIDE * LED_GRID_SIDE,
         label="LEDs used (center-out)",
     )
-    t4_step_led_btn = mo.ui.button(label="Step 1 LED")
-    t4_step_iter_btn = mo.ui.button(label="Step 1 iteration")
-    t4_run_btn = mo.ui.button(label="Run N iters")
-    t4_reset_btn = mo.ui.button(label="Reset")
+    t4_step_led_btn = mo.ui.button(label="Step 1 LED", value=0, on_click=lambda v: v + 1)
+    t4_step_iter_btn = mo.ui.button(label="Step 1 iteration", value=0, on_click=lambda v: v + 1)
+    t4_run_btn = mo.ui.button(label="Run N iters", value=0, on_click=lambda v: v + 1)
+    t4_reset_btn = mo.ui.button(label="Reset", value=0, on_click=lambda v: v + 1)
     t4_controls = mo.vstack([
         mo.md("**Reconstruction stepper** — alternating projection."),
         mo.hstack([t4_step_led_btn, t4_step_iter_btn, t4_run_btn,
                    t4_iters_per_run, t4_reset_btn]),
         mo.hstack([t4_led_count, t4_bad_init]),
     ])
-    t4_controls
     return (
         t4_bad_init,
         t4_controls,
@@ -1385,7 +1377,6 @@ def _t4_overlap_control(LED_SPACING_PX_DEFAULT, mo):
                        "overlap between adjacent Fourier windows ⇒ more "
                        "redundancy ⇒ better phase recovery.")
     t4_overlap_block = mo.vstack([t4_overlap, t4_spacing])
-    t4_overlap_block
     return t4_overlap_block, t4_spacing
 
 
@@ -1581,13 +1572,13 @@ def _t4_runner(
     # Counter-based dispatch: each click increments the corresponding counter.
     # We compare to the snapshot stored in the state.
     _state = get_t4_state()
-    _last = _state.get("_btn_counts", {})
     _now = {
         "led": int(t4_step_led_btn.value or 0),
         "iter": int(t4_step_iter_btn.value or 0),
         "run": int(t4_run_btn.value or 0),
         "reset": int(t4_reset_btn.value or 0),
     }
+    _last = _state.get("_btn_counts", _now)
     _delta_reset = _now["reset"] - _last.get("reset", 0)
     _delta_iter = _now["iter"] - _last.get("iter", 0)
     _delta_led = _now["led"] - _last.get("led", 0)
@@ -1686,14 +1677,13 @@ def _t4_display(
             _a.set_yticks([])
     _ax[0, 2].set_xticks([])
     _ax[0, 2].set_yticks([])
-    t4_plot = mo.mpl.interactive(_fig)
+    t4_plot = show_fig(_fig)
     _err_txt = (f"{_err_hist[-1]:.3e}" if _err_hist else "—")
     t4_status = mo.md(
         f"**Iterations completed:** {_iter_count}   "
         f"| **LEDs done in current iter:** {_led_done} / {len(leds_in_use)}   "
         f"| **last error:** {_err_txt}"
     )
-    mo.vstack([t4_plot, t4_status])
     return t4_plot, t4_status
 
 
@@ -1767,7 +1757,6 @@ def _t2d_controls(mo):
         ),
         mo.hstack([t2d_kind, t2d_NA]),
     ])
-    t2d_controls
     return t2d_NA, t2d_controls, t2d_kind
 
 
@@ -1822,7 +1811,7 @@ def _t2d_plot(
     for _a in _ax:
         _a.set_xticks([])
         _a.set_yticks([])
-    t2d_plot = mo.mpl.interactive(_fig)
+    t2d_plot = show_fig(_fig)
     if _kind == "pure phase (cell-like)":
         _msg = (
             "**Look at the right pane.** A blob of phase variation — but the "
@@ -1843,7 +1832,6 @@ def _t2d_plot(
             "recover them with FPM."
         )
     t2d_caption = mo.md(_label + ". " + _msg)
-    mo.vstack([t2d_plot, t2d_caption])
     return t2d_caption, t2d_plot
 
 
@@ -1882,7 +1870,6 @@ def _t2e_controls(mo):
         mo.hstack([t2e_astig_x, t2e_astig_y]),
         mo.hstack([t2e_coma_x, t2e_coma_y]),
     ])
-    t2e_controls
     return (
         t2e_NA,
         t2e_astig_x,
@@ -1964,7 +1951,7 @@ def _t2e_plot(
     for _a in _ax:
         _a.set_xticks([])
         _a.set_yticks([])
-    t2e_plot = mo.mpl.interactive(_fig)
+    t2e_plot = show_fig(_fig)
     t2e_caption = mo.md(
         "**What to notice.** Defocus → a soft ring-like PSF, blurring. "
         "Astigmatism → asymmetric (line-like) PSF. Coma → tail trailing off "
@@ -1972,7 +1959,6 @@ def _t2e_plot(
         "image in a characteristic way — and each can be *estimated* from "
         "data, which is what Tab 5's pupil-recovery toggle does."
     )
-    mo.vstack([t2e_plot, t2e_caption])
     return t2e_caption, t2e_plot
 
 
@@ -2040,7 +2026,6 @@ def _t5_controls(mo):
         mo.hstack([t5_led_miss, t5_partial_coh]),
         mo.hstack([t5_iters, t5_run]),
     ])
-    t5_controls
     return (
         t5_aberration,
         t5_controls,
@@ -2268,7 +2253,7 @@ def _t5_display(
             _a.set_yticks([])
     _ax[0, 2].set_xticks([])
     _ax[0, 2].set_yticks([])
-    t5_plot = mo.mpl.interactive(_fig)
+    t5_plot = show_fig(_fig)
 
     if t5_epry.value and t5_aberration.value > 0:
         _figp, _axp = plt.subplots(1, 2, figsize=(6.5, 3.3),
@@ -2281,7 +2266,7 @@ def _t5_display(
         for _a in _axp:
             _a.set_xticks([])
             _a.set_yticks([])
-        t5_pupil_plot = mo.mpl.interactive(_figp)
+        t5_pupil_plot = show_fig(_figp)
     else:
         t5_pupil_plot = mo.md("")
     return t5_plot, t5_pupil_plot
@@ -2320,7 +2305,6 @@ def _t5_prompts(mo):
             "pinholes / narrower filters help, but you can't iterate it away."
         ),
     })
-    t5_prompts
     return (t5_prompts,)
 
 

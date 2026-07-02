@@ -23,7 +23,11 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install marimo numpy matplotlib
+        # Pinned to the versions the app is developed against, so a working
+        # build stays working. Bump these deliberately when you upgrade locally.
+        run: pip install marimo==0.23.9 numpy==2.4.3 matplotlib==3.10.8
+      - name: Sanity check (compile + dependency graph)
+        run: python dev.py check
       - name: Export WASM build
         run: marimo export html-wasm app.py -o dist --mode run
       - name: Upload artifact
