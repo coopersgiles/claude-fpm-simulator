@@ -99,3 +99,27 @@ re-export, or just use `python dev.py preview`.
 - numpy + matplotlib only (no scipy) to keep the WASM bundle small and cold-load fast.
 - One FFT sign/orientation convention, documented once in the `app.py` docstring.
 - Prose lives in `mo.md(...)` inside the relevant cell, co-located with its widget.
+
+## Backlog (next session)
+State as of 2026-07-02: the app is deployed and considered a solid intro to FPM
+(meant to be read alongside a written intro / Goodman). Remaining polish, none
+blocking — roughly in priority order:
+
+1. **Speed / preloading.** Interactions (esp. the Tab 4 reconstruction, ~2–3 s in
+   Pyodide at 7×7 LEDs) and cold-load feel sluggish. Cheapest big win: the Tab 4
+   slider has only 5 states (`n_side` 3–7) — **precompute those reconstructions
+   (and measurement stacks) once and cache/embed them** so the slider is instant
+   instead of re-running the alternating projection live. Also look at cold-load
+   (trim anything, keep numpy+matplotlib only). "We might cheat and just preload
+   some stuff to make everything super fast" — that's the intent.
+2. **Color scale bars.** Add colorbars so students can read values: a cyclic
+   bar (−π…π) for every phase pane and a grayscale bar for magnitude/amplitude.
+   Best done once in the `two_pane`/`three_pane` helpers (add an optional
+   `colorbar=True`) and in the Tab 4 payoff panels, which currently have none.
+3. **Minor simulation issues to check** (user flagged, specifics TBD — ask which).
+   Worth an audit pass: FFT sign/orientation convention end-to-end, the k-shift
+   direction vs pupil sampling, the Poisson/read-noise model realism, and that
+   the Tab-4 constraint-count numbers are defensible. Nothing known-broken.
+
+Everything is committed and pushed to `web` (deployed). `dev.py check` passes,
+`embed()` runs all cells, fresh export renders all 13 figures.
