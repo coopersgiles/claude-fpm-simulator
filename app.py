@@ -1302,7 +1302,7 @@ def _t3_assembly(
 
 
 # ===========================================================================
-# TAB 4  —  ground-truth, forward simulation, reconstruction stepper
+# TAB 4 / TAB 5 shared setup  —  ground truth + reconstruction geometry
 # ===========================================================================
 
 
@@ -1334,396 +1334,259 @@ def _t4_geometry(N_RECON):
     return LED_GRID_SIDE, LED_SPACING_PX_DEFAULT, PUPIL_CUTOFF_PX
 
 
+# ===========================================================================
+# TAB 4  —  Why overlap buys resolution (stateless / reactive)
+#   The camera measures intensity (phase discarded). Overlapping Fourier
+#   windows over-determine the problem just enough to solve for that missing
+#   phase, and the recovered phase is what synthesizes a larger aperture =
+#   resolution. One slider (LED array density) drives the whole story.
+# ===========================================================================
+
+
 @app.cell
-def _t4_controls(LED_GRID_SIDE, LED_SPACING_PX_DEFAULT, mo):
-    t4_iters_per_run = mo.ui.slider(
-        1, 50, step=1, value=10, label="iterations per 'Run' click",
+def _t4_config():
+    # Tab-4 geometry (independent of the Tab-5 reconstruction constants).
+    # Low-NA objective (small pupil) so the bare image is blurry; a fixed
+    # synthetic aperture (the resolution ceiling) is reached by the LED array.
+    T4_R_OBJ = 11             # objective pupil cutoff radius (px in k-space)
+    T4_R_MAX = 26             # outermost LED shift (px) -> fixed synthetic NA
+    T4_R_SYNTH = T4_R_OBJ + T4_R_MAX
+    T4_ITERS = 7              # reconstruction iterations (capped for snappiness)
+    T4_PHOTONS = 1.5e3        # mild shot noise so weak overlap visibly struggles
+    return T4_ITERS, T4_PHOTONS, T4_R_MAX, T4_R_OBJ, T4_R_SYNTH
+
+
+@app.cell
+def _t4_target(N_RECON, np):
+    def siemens_star(N=N_RECON, spokes=16, r_out=52, r_in=3):
+        """Radial 'Siemens star' resolution target. Spokes get finer toward the
+        centre, so resolution reads directly as how close to the middle you can
+        still separate them."""
+        y = np.arange(N) - N // 2
+        yy, xx = np.meshgrid(y, y, indexing="ij")
+        th = np.arctan2(yy, xx)
+        rho = np.hypot(yy, xx)
+        amp = 0.5 + 0.5 * np.sign(np.cos(spokes * th))
+        amp = amp * ((rho < r_out) & (rho > r_in))
+        return amp.astype(np.float64)
+
+    t4_star = siemens_star()
+    return (t4_star,)
+
+
+@app.cell
+def _t4_controls(mo):
+    t4_nside = mo.ui.slider(
+        3, 7, step=1, value=3,
+        label="LEDs across the array  (more LEDs = more Fourier-window overlap)",
     )
-    t4_bad_init = mo.ui.switch(value=False, label="bad initialization")
-    t4_led_count = mo.ui.slider(
-        1, LED_GRID_SIDE * LED_GRID_SIDE,
-        value=LED_GRID_SIDE * LED_GRID_SIDE,
-        label="LEDs used (center-out)",
-    )
-    t4_step_led_btn = mo.ui.button(label="Step 1 LED", value=0, on_click=lambda v: v + 1)
-    t4_step_iter_btn = mo.ui.button(label="Step 1 iteration", value=0, on_click=lambda v: v + 1)
-    t4_run_btn = mo.ui.button(label="Run N iters", value=0, on_click=lambda v: v + 1)
-    t4_reset_btn = mo.ui.button(label="Reset", value=0, on_click=lambda v: v + 1)
     t4_controls = mo.vstack([
-        mo.md("**Reconstruction stepper** — alternating projection."),
-        mo.hstack([t4_step_led_btn, t4_step_iter_btn, t4_run_btn,
-                   t4_iters_per_run, t4_reset_btn]),
-        mo.hstack([t4_led_count, t4_bad_init]),
+        mo.md("**Turn up the overlap.** Start sparse (left), predict what the "
+              "reconstruction can recover, then add LEDs and watch."),
+        t4_nside,
     ])
-    return (
-        t4_bad_init,
-        t4_controls,
-        t4_iters_per_run,
-        t4_led_count,
-        t4_reset_btn,
-        t4_run_btn,
-        t4_step_iter_btn,
-        t4_step_led_btn,
-    )
-
-
-@app.cell
-def _t4_overlap_control(LED_SPACING_PX_DEFAULT, mo):
-    t4_spacing = mo.ui.slider(
-        4, 20, step=1, value=LED_SPACING_PX_DEFAULT,
-        label="LED spacing (px) — smaller = more Fourier overlap",
-    )
-    t4_overlap = mo.md("**Overlap slider** (Widget 2): smaller spacing ⇒ more "
-                       "overlap between adjacent Fourier windows ⇒ more "
-                       "redundancy ⇒ better phase recovery.")
-    t4_overlap_block = mo.vstack([t4_overlap, t4_spacing])
-    return t4_overlap_block, t4_spacing
+    return t4_controls, t4_nside
 
 
 @app.cell
 def _t4_setup(
-    LED_GRID_SIDE,
-    PUPIL_CUTOFF_PX,
-    complex_object,
-    ft,
-    make_ground_truth,
+    T4_PHOTONS,
+    T4_R_MAX,
+    T4_R_OBJ,
+    T4_R_SYNTH,
     make_pupil,
     np,
     simulate_intensity,
-    t4_bad_init,
-    t4_led_count,
-    t4_spacing,
+    t4_nside,
+    t4_star,
 ):
-    """Build (or rebuild) ground truth, LED layout, and measurement stack."""
-    _N = make_ground_truth()[0].shape[0]
-    amp_gt, phi_gt = make_ground_truth()
-    obj_gt = complex_object(amplitude=amp_gt, phase=phi_gt)
-    pupil = make_pupil(_N, PUPIL_CUTOFF_PX)
+    _N = t4_star.shape[0]
+    _n = int(t4_nside.value)
+    # Fixed synthetic aperture: n x n LEDs spanning [-R_MAX, R_MAX].
+    _pos = np.linspace(-T4_R_MAX, T4_R_MAX, _n)
+    t4_leds = [(int(round(_ky)), int(round(_kx))) for _ky in _pos for _kx in _pos]
+    _spacing = (2 * T4_R_MAX / (_n - 1)) if _n > 1 else 0.0
+    t4_overlap = max(0.0, 1.0 - _spacing / (2 * T4_R_OBJ))
 
-    # 3x3 grid in (ky, kx) pixels, centered at origin
-    _side = LED_GRID_SIDE
-    _spacing = int(t4_spacing.value)
-    _coords1d = np.arange(-(_side // 2), _side // 2 + 1) * _spacing
-    led_positions = []  # (ky_px, kx_px, dist_steps)
-    _ctr = _side // 2
-    for _i, _ky in enumerate(_coords1d):
-        for _j, _kx in enumerate(_coords1d):
-            _step = max(abs(_i - _ctr), abs(_j - _ctr))
-            led_positions.append((_ky, _kx, _step))
-    # order LEDs center-out so "fewer LEDs" cuts the outermost first
-    led_positions.sort(key=lambda t: (t[2], abs(t[0]) + abs(t[1])))
+    t4_pupil = make_pupil(_N, T4_R_OBJ)
 
-    # Choose how many LEDs to use
-    _n_use = int(t4_led_count.value)
-    leds_in_use = led_positions[:_n_use]
+    # Measurement stack, with mild deterministic shot noise.
+    _rng = np.random.default_rng(0)
+    _stack = []
+    for _k in t4_leds:
+        _img = simulate_intensity(t4_star, t4_pupil, _k)
+        _sc = _img.max() + 1e-12
+        _img = _rng.poisson(_img / _sc * T4_PHOTONS) / T4_PHOTONS * _sc
+        _stack.append(_img)
+    t4_measurements = np.stack(_stack, axis=0)
 
-    # Precompute the measurement stack: one image per LED.
-    measurements = np.stack(
-        [simulate_intensity(obj_gt, pupil, (ky, kx))
-         for (ky, kx, _) in leds_in_use],
-        axis=0,
-    )
+    # Redundancy map: how many LED windows measure each spatial frequency.
+    _mask = (np.abs(t4_pupil) > 0).astype(np.float64)
+    _cov = np.zeros((_N, _N))
+    for (_ky, _kx) in t4_leds:
+        _cov += np.roll(_mask, shift=(-_ky, -_kx), axis=(0, 1))
+    t4_coverage = _cov
 
-    # Initial high-res spectrum estimate
-    if t4_bad_init.value:
-        _rng = np.random.default_rng(0)
-        init_field = (np.ones((_N, _N))
-                      * np.exp(1j * _rng.uniform(-np.pi, np.pi, size=(_N, _N))))
-    else:
-        # Brightfield (central LED) upsampled amplitude, flat phase
-        _bf_idx = 0  # center after sort
-        init_field = np.sqrt(measurements[_bf_idx]).astype(np.complex128)
-    init_spectrum = ft(init_field)
-    return (
-        amp_gt,
-        init_spectrum,
-        leds_in_use,
-        measurements,
-        obj_gt,
-        phi_gt,
-        pupil,
-    )
-
-
-@app.cell
-def _t4_state(init_spectrum, mo, np):
-    """Reactive state container for the iterative recovery.
-
-    Setting state to (a new array, ...) triggers downstream cells to rerun.
-    """
-    get_t4_state, set_t4_state = mo.state({
-        "spectrum_est": init_spectrum.copy(),
-        "iter_count": 0,
-        "led_count_done": 0,        # within the current iteration
-        "error_hist": [],           # one entry per FULL iteration
-    })
-    return get_t4_state, set_t4_state
-
-
-@app.cell
-def _t4_reset_on_rebuild(init_spectrum, set_t4_state):
-    """Whenever init_spectrum is rebuilt (controls changed) reset the state.
-
-    init_spectrum is rebuilt only by upstream control changes, so depending
-    on it here gives us automatic reset semantics.
-    """
-    set_t4_state({
-        "spectrum_est": init_spectrum.copy(),
-        "iter_count": 0,
-        "led_count_done": 0,
-        "error_hist": [],
-    })
-    return
-
-
-@app.cell
-def _t4_runner(
-    PUPIL_CUTOFF_PX,
-    ft,
-    get_t4_state,
-    ift,
-    init_spectrum,
-    leds_in_use,
-    measurements,
-    np,
-    pupil,
-    set_t4_state,
-    t4_iters_per_run,
-    t4_reset_btn,
-    t4_run_btn,
-    t4_step_iter_btn,
-    t4_step_led_btn,
-):
-    """One cell reacts to button clicks and advances the algorithm.
-
-    We track 'last seen' counter values via a module-level dict so multiple
-    clicks of the same button each fire exactly once.
-    """
-    _N = init_spectrum.shape[0]
-
-    def _apply_one_led(spec, led_index):
-        ky, kx, _ = leds_in_use[led_index]
-        # Shift spectrum window matching this LED's k-shift, mask with pupil
-        S_shifted = np.roll(spec, shift=(ky, kx), axis=(0, 1))
-        # The window we care about is whatever the pupil multiplies (a centered disk)
-        cropped = pupil * S_shifted
-        low_res = ift(cropped)
-        # amplitude replacement
-        meas_amp = np.sqrt(np.clip(measurements[led_index], 0.0, None))
-        # avoid division by zero in phase extraction
-        phase = np.exp(1j * np.angle(low_res))
-        new_low_res = meas_amp * phase
-        new_cropped = ft(new_low_res)
-        # update the pupil region in the shifted-spectrum frame
-        # Use a Wiener-like step: replace where pupil is on, keep otherwise.
-        mask = np.abs(pupil) > 0
-        S_new = S_shifted.copy()
-        S_new[mask] = new_cropped[mask]
-        # un-shift
-        spec_new = np.roll(S_new, shift=(-ky, -kx), axis=(0, 1))
-        return spec_new
-
-    def _full_iteration_error(spec):
-        # Measurement residual ‖|y_i| − √I_i‖² averaged across LEDs
-        err = 0.0
-        for i, (ky, kx, _) in enumerate(leds_in_use):
-            S_shifted = np.roll(spec, shift=(ky, kx), axis=(0, 1))
-            low_res = ift(pupil * S_shifted)
-            est_amp = np.abs(low_res)
-            meas_amp = np.sqrt(np.clip(measurements[i], 0.0, None))
-            err += float(np.mean((est_amp - meas_amp) ** 2))
-        return err / max(len(leds_in_use), 1)
-
-    def _do_iters(state, n):
-        spec = state["spectrum_est"]
-        iter_count = state["iter_count"]
-        err_hist = list(state["error_hist"])
-        for _ in range(n):
-            for k in range(len(leds_in_use)):
-                spec = _apply_one_led(spec, k)
-            iter_count += 1
-            err_hist.append(_full_iteration_error(spec))
-        return {
-            "spectrum_est": spec,
-            "iter_count": iter_count,
-            "led_count_done": 0,
-            "error_hist": err_hist,
-        }
-
-    def _do_one_led(state):
-        spec = state["spectrum_est"]
-        led_done = state["led_count_done"]
-        n_leds = len(leds_in_use)
-        spec = _apply_one_led(spec, led_done % n_leds)
-        led_done += 1
-        iter_count = state["iter_count"]
-        err_hist = list(state["error_hist"])
-        if led_done >= n_leds:
-            iter_count += 1
-            err_hist.append(_full_iteration_error(spec))
-            led_done = 0
-        return {
-            "spectrum_est": spec,
-            "iter_count": iter_count,
-            "led_count_done": led_done,
-            "error_hist": err_hist,
-        }
-
-    # Counter-based dispatch: each click increments the corresponding counter.
-    # We compare to the snapshot stored in the state.
-    _state = get_t4_state()
-    _now = {
-        "led": int(t4_step_led_btn.value or 0),
-        "iter": int(t4_step_iter_btn.value or 0),
-        "run": int(t4_run_btn.value or 0),
-        "reset": int(t4_reset_btn.value or 0),
+    # Back-of-envelope constraint count (the 'why').
+    _yy, _xx = np.ogrid[:_N, :_N]
+    _r2 = (_yy - _N // 2) ** 2 + (_xx - _N // 2) ** 2
+    _n_freq = int((_r2 <= T4_R_SYNTH ** 2).sum())     # frequencies to synthesize
+    _pix_per_img = int((_r2 <= T4_R_OBJ ** 2).sum())  # measured values per image
+    t4_counts = {
+        "unknowns_mag": _n_freq,
+        "unknowns_phase": 2 * _n_freq,
+        "measurements": len(t4_leds) * _pix_per_img,
+        "n_leds": len(t4_leds),
     }
-    _last = _state.get("_btn_counts", _now)
-    _delta_reset = _now["reset"] - _last.get("reset", 0)
-    _delta_iter = _now["iter"] - _last.get("iter", 0)
-    _delta_led = _now["led"] - _last.get("led", 0)
-    _delta_run = _now["run"] - _last.get("run", 0)
-
-    if _delta_reset > 0:
-        _new_state = {
-            "spectrum_est": init_spectrum.copy(),
-            "iter_count": 0,
-            "led_count_done": 0,
-            "error_hist": [],
-        }
-    else:
-        _new_state = _state
-        if _delta_iter > 0:
-            _new_state = _do_iters(_new_state, _delta_iter)
-        if _delta_led > 0:
-            for _ in range(_delta_led):
-                _new_state = _do_one_led(_new_state)
-        if _delta_run > 0:
-            _new_state = _do_iters(
-                _new_state, int(t4_iters_per_run.value) * _delta_run,
-            )
-
-    if (_delta_reset + _delta_iter + _delta_led + _delta_run) > 0:
-        _new_state = {**_new_state, "_btn_counts": _now}
-        set_t4_state(_new_state)
-    return
+    return t4_counts, t4_coverage, t4_leds, t4_measurements, t4_overlap, t4_pupil
 
 
 @app.cell
-def _t4_display(
+def _t4_recon(T4_ITERS, ft, ift, np, t4_leds, t4_measurements, t4_pupil):
+    """Alternating-projection recovery (reactive: reruns when the slider moves)."""
+    _mask = np.abs(t4_pupil) > 0
+    _order = sorted(range(len(t4_leds)),
+                    key=lambda i: t4_leds[i][0] ** 2 + t4_leds[i][1] ** 2)
+    _spec = ft(np.sqrt(np.clip(t4_measurements[_order[0]], 0.0, None)
+                       ).astype(np.complex128))
+    for _ in range(T4_ITERS):
+        for _i in _order:
+            _ky, _kx = t4_leds[_i]
+            _S = np.roll(_spec, shift=(_ky, _kx), axis=(0, 1))
+            _low = ift(t4_pupil * _S)
+            _newlow = (np.sqrt(np.clip(t4_measurements[_i], 0.0, None))
+                       * np.exp(1j * np.angle(_low)))
+            _Sn = _S.copy()
+            _Sn[_mask] = ft(_newlow)[_mask]
+            _spec = np.roll(_Sn, shift=(-_ky, -_kx), axis=(0, 1))
+    t4_recovered = ift(_spec)
+    return (t4_recovered,)
+
+
+@app.cell
+def _t4_why_plot(
     Circle,
-    PUPIL_CUTOFF_PX,
-    amp_gt,
-    get_t4_state,
-    ift,
-    leds_in_use,
+    T4_R_OBJ,
+    T4_R_SYNTH,
     mo,
-    np,
-    phi_gt,
     plt,
+    show_fig,
+    t4_counts,
+    t4_coverage,
+    t4_overlap,
 ):
-    _state = get_t4_state()
-    _spec_est = _state["spectrum_est"]
-    _iter_count = _state["iter_count"]
-    _led_done = _state["led_count_done"]
-    _err_hist = _state["error_hist"]
-    _field_est = ift(_spec_est)
-    _amp_est = np.abs(_field_est)
-    _phi_est = np.angle(_field_est)
-    # remove global phase offset for comparison
-    _gt_complex = amp_gt * np.exp(1j * phi_gt)
-    if np.abs(np.sum(_field_est * np.conj(_gt_complex))) > 1e-9:
-        _phase_offset = np.angle(np.sum(_field_est * np.conj(_gt_complex)))
-        _phi_est = np.angle(_field_est * np.exp(-1j * _phase_offset))
+    _N = t4_coverage.shape[0]
+    _fig, _ax = plt.subplots(1, 2, figsize=(7.6, 3.7), constrained_layout=True)
 
-    _fig, _ax = plt.subplots(2, 3, figsize=(11.5, 7.2),
-                             constrained_layout=True)
-    _ax[0, 0].imshow(amp_gt, cmap="gray", vmin=0, vmax=1.05)
-    _ax[0, 0].set_title("ground-truth amplitude", fontsize=10)
-    _ax[0, 1].imshow(phi_gt, cmap="twilight", vmin=-2.0, vmax=2.0)
-    _ax[0, 1].set_title("ground-truth phase (rad)", fontsize=10)
-    _ax[0, 2].imshow(np.log1p(np.abs(_spec_est)), cmap="gray")
-    _ax[0, 2].set_title("|recovered spectrum|  (log)", fontsize=10)
-    # Outline the pupil patches actually filled (each LED's window)
-    _N = _spec_est.shape[0]
-    _cy, _cx = _N // 2, _N // 2
-    for (_ky_led, _kx_led, _) in leds_in_use:
-        _ring = Circle((_cx - _kx_led, _cy - _ky_led), PUPIL_CUTOFF_PX,
-                       fill=False, edgecolor="cyan", linewidth=0.6,
-                       linestyle="--", alpha=0.7)
-        _ax[0, 2].add_patch(_ring)
-    _ax[1, 0].imshow(_amp_est, cmap="gray", vmin=0, vmax=1.05)
-    _ax[1, 0].set_title("recovered amplitude", fontsize=10)
-    _ax[1, 1].imshow(_phi_est, cmap="twilight", vmin=-2.0, vmax=2.0)
-    _ax[1, 1].set_title("recovered phase (rad)", fontsize=10)
-    if _err_hist:
-        _ax[1, 2].plot(range(1, len(_err_hist) + 1), _err_hist, "-o",
-                       markersize=3)
-        _ax[1, 2].set_yscale("log")
-        _ax[1, 2].set_xlabel("iteration")
-        _ax[1, 2].set_ylabel("mean measurement residual")
-        _ax[1, 2].set_title("error per iteration", fontsize=10)
-        _ax[1, 2].grid(True, alpha=0.3)
-    else:
-        _ax[1, 2].text(0.5, 0.5,
-                       "click 'Step 1 iteration' or 'Run N iters'",
-                       transform=_ax[1, 2].transAxes,
-                       ha="center", va="center", fontsize=9)
-        _ax[1, 2].set_xticks([])
-        _ax[1, 2].set_yticks([])
-    for _row in _ax[:2]:
-        for _a in _row[:2]:
-            _a.set_xticks([])
-            _a.set_yticks([])
-    _ax[0, 2].set_xticks([])
-    _ax[0, 2].set_yticks([])
-    t4_plot = show_fig(_fig)
-    _err_txt = (f"{_err_hist[-1]:.3e}" if _err_hist else "—")
-    t4_status = mo.md(
-        f"**Iterations completed:** {_iter_count}   "
-        f"| **LEDs done in current iter:** {_led_done} / {len(leds_in_use)}   "
-        f"| **last error:** {_err_txt}"
+    _im = _ax[0].imshow(t4_coverage, cmap="magma")
+    _ax[0].set_title(f"k-space redundancy — LEDs measuring\n"
+                     f"each frequency (overlap ≈ {t4_overlap:.0%})",
+                     fontsize=9)
+    _fig.colorbar(_im, ax=_ax[0], fraction=0.046, shrink=0.85,
+                  label="× measured")
+    for _r, _col in [(T4_R_SYNTH, "cyan"), (T4_R_OBJ, "white")]:
+        _ax[0].add_patch(Circle((_N / 2 - 0.5, _N / 2 - 0.5), _r, fill=False,
+                                edgecolor=_col, lw=1.0, ls="--"))
+    _ax[0].set_xticks([])
+    _ax[0].set_yticks([])
+
+    _u = t4_counts["unknowns_phase"]
+    _m = t4_counts["measurements"]
+    _ax[1].barh([2, 1], [t4_counts["unknowns_mag"], _u],
+                color=["#9aa7ff", "#3344cc"])
+    _ax[1].barh([0], [_m], color=("#2ca02c" if _m >= _u else "#d62728"))
+    _ax[1].set_yticks([2, 1, 0])
+    _ax[1].set_yticklabels(["unknowns\n(ignore phase)", "unknowns\n(+ phase!)",
+                            "measurements"], fontsize=8)
+    _ax[1].set_xlabel("count (real numbers)", fontsize=8)
+    _ax[1].set_title("counting the constraints", fontsize=9)
+    t4_why_fig = show_fig(_fig)
+
+    _verdict = (
+        "**over-determined** — more measurements than unknowns, "
+        "so there's enough to solve for the hidden phase"
+        if _m >= _u else
+        "**under-determined** — fewer measurements than unknowns; "
+        "the phase can't be pinned down, so the high-res detail stays lost"
     )
-    return t4_plot, t4_status
+    t4_why = mo.vstack([
+        t4_why_fig,
+        mo.md(
+            f"Intensity = |field|², so each of the "
+            f"**{t4_counts['unknowns_mag']:,}** frequencies you want is really "
+            f"**two** unknowns — a magnitude *and a phase* "
+            f"(**{_u:,}** real unknowns). Overlapping windows re-measure shared "
+            f"frequencies ({t4_counts['n_leds']} LEDs → **{_m:,}** "
+            f"measurements); that redundancy is what supplies the missing "
+            f"phase.\n\n{_verdict}."
+        ),
+    ])
+    return (t4_why,)
 
 
 @app.cell
-def _t4_assembly(
-    mo,
-    t4_controls,
-    t4_overlap_block,
-    t4_plot,
-    t4_status,
+def _t4_payoff_plot(
+    T4_R_OBJ,
+    ft,
+    ift,
+    make_pupil,
+    np,
+    plt,
+    show_fig,
+    t4_overlap,
+    t4_recovered,
+    t4_star,
 ):
+    _N = t4_star.shape[0]
+    _obj_only = np.abs(ift(make_pupil(_N, T4_R_OBJ) * ft(t4_star)))
+    _fig, _ax = plt.subplots(1, 3, figsize=(10.5, 3.7), constrained_layout=True)
+    for _a, _im, _t in [
+        (_ax[0], t4_star, "target (ground truth)"),
+        (_ax[1], _obj_only, "bare objective\n(low resolution)"),
+        (_ax[2], np.abs(t4_recovered),
+         f"FPM reconstruction\n(overlap ≈ {t4_overlap:.0%})"),
+    ]:
+        _a.imshow(_im, cmap="gray")
+        _a.set_title(_t, fontsize=9)
+        _a.set_xticks([])
+        _a.set_yticks([])
+    t4_payoff = show_fig(_fig)
+    return (t4_payoff,)
+
+
+@app.cell
+def _t4_assembly(mo, t4_controls, t4_payoff, t4_why):
     tab4 = mo.vstack([
         mo.md(
-            "## Tab 4 — The inverse problem: recover phase from intensity\n\n"
-            "The camera records intensity only. Yet most of an object's "
-            "information lives in **phase** (Tab 1, Widget 2). FPM recovers "
-            "the phase by an **alternating projection** between two "
-            "constraints: (1) the high-res spectrum we're estimating, "
-            "filtered by each LED's pupil window, should give a low-res "
-            "complex field whose **amplitude equals √(measured intensity)**; "
-            "(2) the windows must agree where they overlap. Iterating "
-            "between these two constraints fills the spectrum in.\n\n"
-            "The ground truth here is a small complex object — a `+` in "
-            "amplitude, blobs in phase. **9 LEDs (3×3)** keep the math "
-            "tight; the *lesson* is phase emerging from intensity data, "
-            "not a giant resolution leap."
+            "## Tab 4 — Why overlap buys resolution\n\n"
+            "Your camera records only **intensity** — it throws away the "
+            "**phase** of the light (Tab 1, Widget 2: scramble an image's phase "
+            "and its structure is destroyed — phase is where the information "
+            "lives).\n\n"
+            "So FPM has a puzzle. Each photo captures a small disk of the "
+            "object's spectrum, but *without its phase*. Lay those disks side by "
+            "side and you still can't stitch them — the phase that aligns one "
+            "disk to the next is missing. The fix is **overlap**: make "
+            "neighbouring measurements share spectral territory. Those shared, "
+            "redundant measurements **over-determine** the problem just enough to "
+            "**solve for the phase you never recorded** — and the recovered "
+            "phase is what fuses the disks into one large synthetic aperture. "
+            "That is where the extra **resolution** comes from."
         ),
         t4_controls,
-        t4_plot,
-        t4_status,
-        mo.md("---"),
-        t4_overlap_block,
+        mo.md("### Why it works — the redundancy that pays for phase"),
+        t4_why,
+        mo.md("### What it buys — resolution"),
+        t4_payoff,
         mo.md(
-            "**Why overlap matters.** Adjacent LEDs probe overlapping "
-            "spectral regions. The shared content is what links the "
-            "phases between neighbouring windows — that redundancy is what "
-            "lets us solve for phase from intensity-only data. Drop the "
-            "spacing low (more overlap): convergence improves. Push it past "
-            "the pupil diameter (no overlap): the windows are disconnected, "
-            "phase recovery degrades."
+            "**Predict, then slide.** With the fewest LEDs the windows barely "
+            "overlap: the problem is under-determined, the phase can't be "
+            "recovered, and the fine spokes near the centre stay blurred — no "
+            "better than the bare objective. Add LEDs (push the overlap past "
+            "~half): the phase locks, the synthetic aperture fills in, and the "
+            "spokes sharpen toward the centre. **Same field of view, more "
+            "resolution — bought entirely with overlap.** *(In practice ~60% "
+            "overlap is the standard operating point.)*"
         ),
     ])
     return (tab4,)

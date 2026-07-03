@@ -62,13 +62,33 @@ Each tab = controls cell(s) + plot cell(s) + prose cell(s), gathered by a
 `_tabN_assembly` cell. Grids: **256²** for the live Tabs 1–3, **128²** for the
 Tab 4/5 reconstruction (keeps the iterative loop responsive).
 
-### Tab 4 reconstruction (the subtle part)
-Alternating-projection (Gerchberg–Saxton-style) recovery. State lives in
-`mo.state` (`_t4_state`); `_t4_runner` advances it. The stepper buttons are
-**click counters** (`mo.ui.button(value=0, on_click=lambda v: v + 1)`); the runner
-diffs each button's current count against the count snapshotted in state, so each
-click fires exactly once. A plain `mo.ui.button()` has `value=None` and never
-increments — if the stepper ever "does nothing," check that first.
+The five tabs own distinct ideas — keep them distinct: Tab 3 = *more angles →
+more resolution* (bandwidth), **Tab 4 = *overlap → phase → resolution*** (why
+phase retrieval is possible at all), Tab 5 = *does it survive real noise /
+aberration* (practice).
+
+### Tab 4 — "Why overlap buys resolution" (stateless / reactive)
+Rebuilt to teach the phase-retrieval insight, not to be another reconstruction
+stepper. One slider (`t4_nside`, LEDs across a fixed-aperture array) drives
+everything reactively — **no `mo.state`, no buttons** (the old click-counter
+stepper is gone). Pipeline of pure cells: `_t4_config` (geometry constants
+`T4_*`) → `_t4_target` (a Siemens-star resolution target) → `_t4_setup` (LED
+grid, overlap %, noisy measurements, k-space redundancy map, constraint counts)
+→ `_t4_recon` (alternating-projection recovery, reruns on slider change) →
+`_t4_why_plot` (redundancy map + measurements-vs-unknowns bar; phase doubles the
+unknowns, overlap supplies them) → `_t4_payoff_plot` (target | bare objective |
+FPM recon — spokes sharpen only when overlap is high enough) → `_t4_assembly`.
+Physics is tuned (`R_OBJ=11`, `R_SYNTH=37`, `~7` iters, mild shot noise) so the
+under-→over-determined transition is visible around ~40–60% overlap. Reuses the
+shared `simulate_intensity`/`ft`/`ift`/`make_pupil`. Note `_t4_groundtruth`
+(`make_ground_truth`) and `_t4_geometry` (`PUPIL_CUTOFF_PX`, `LED_GRID_SIDE`) sit
+just above and are **shared with Tab 5** — don't delete them.
+
+Gotcha: `marimo export html` (the non-WASM static snapshot) can silently reuse a
+stale `__marimo__/session/*.json` cache and emit a code-only file with no
+figures. It's git-ignored and irrelevant to deploy (CI runs fresh; WASM renders
+in-browser); if a local snapshot looks empty, delete `__marimo__/session` and
+re-export, or just use `python dev.py preview`.
 
 ## Conventions
 - numpy + matplotlib only (no scipy) to keep the WASM bundle small and cold-load fast.
