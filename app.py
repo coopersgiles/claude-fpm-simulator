@@ -1351,27 +1351,36 @@ def _t4_config():
     T4_R_OBJ = 11             # objective pupil cutoff radius (px in k-space)
     T4_R_MAX = 26             # outermost LED shift (px) -> fixed synthetic NA
     T4_R_SYNTH = T4_R_OBJ + T4_R_MAX
-    T4_ITERS = 7              # reconstruction iterations (capped for snappiness)
+    T4_ITERS = 10             # reconstruction iterations
     T4_PHOTONS = 1.5e3        # mild shot noise so weak overlap visibly struggles
     return T4_ITERS, T4_PHOTONS, T4_R_MAX, T4_R_OBJ, T4_R_SYNTH
 
 
 @app.cell
 def _t4_target(N_RECON, np):
-    def siemens_star(N=N_RECON, spokes=16, r_out=52, r_in=3):
-        """Radial 'Siemens star' resolution target. Spokes get finer toward the
-        centre, so resolution reads directly as how close to the middle you can
-        still separate them."""
+    def _star(N, spokes, r_out, rot=0.0, r_in=3):
         y = np.arange(N) - N // 2
         yy, xx = np.meshgrid(y, y, indexing="ij")
-        th = np.arctan2(yy, xx)
+        th = np.arctan2(yy, xx) - rot
         rho = np.hypot(yy, xx)
-        amp = 0.5 + 0.5 * np.sign(np.cos(spokes * th))
-        amp = amp * ((rho < r_out) & (rho > r_in))
-        return amp.astype(np.float64)
+        return ((0.5 + 0.5 * np.sign(np.cos(spokes * th)))
+                * ((rho < r_out) & (rho > r_in)))
 
-    t4_star = siemens_star()
-    return (t4_star,)
+    def mixed_target(N=N_RECON):
+        """A compact mixed object: a Siemens-star *resolution* target in
+        amplitude (absorption), plus a rotated phase Siemens star. Amplitude
+        carries the resolution story; phase is the harder, hidden channel that
+        a conventional intensity image never sees."""
+        y = np.arange(N) - N // 2
+        yy, xx = np.meshgrid(y, y, indexing="ij")
+        body = (yy ** 2 + xx ** 2) <= 50 ** 2
+        amp = body * (1.0 - 0.6 * _star(N, 16, 50))
+        phi = body * (1.2 * _star(N, 12, 50, rot=np.pi / 12))
+        return amp.astype(np.float64), phi.astype(np.float64)
+
+    t4_amp_gt, t4_phi_gt = mixed_target()
+    t4_obj = t4_amp_gt * np.exp(1j * t4_phi_gt)
+    return t4_amp_gt, t4_obj, t4_phi_gt
 
 
 @app.cell
@@ -1398,9 +1407,9 @@ def _t4_setup(
     np,
     simulate_intensity,
     t4_nside,
-    t4_star,
+    t4_obj,
 ):
-    _N = t4_star.shape[0]
+    _N = t4_obj.shape[0]
     _n = int(t4_nside.value)
     # Fixed synthetic aperture: n x n LEDs spanning [-R_MAX, R_MAX].
     _pos = np.linspace(-T4_R_MAX, T4_R_MAX, _n)
@@ -1414,7 +1423,7 @@ def _t4_setup(
     _rng = np.random.default_rng(0)
     _stack = []
     for _k in t4_leds:
-        _img = simulate_intensity(t4_star, t4_pupil, _k)
+        _img = simulate_intensity(t4_obj, t4_pupil, _k)
         _sc = _img.max() + 1e-12
         _img = _rng.poisson(_img / _sc * T4_PHOTONS) / T4_PHOTONS * _sc
         _stack.append(_img)
@@ -1503,11 +1512,13 @@ def _t4_why_plot(
     t4_why_fig = show_fig(_fig)
 
     _verdict = (
-        "**over-determined** — more measurements than unknowns, "
-        "so there's enough to solve for the hidden phase"
+        "**over-determined** — on paper there are now more measurements than "
+        "unknowns. That's *necessary* for recovery, but (as the picture below "
+        "shows) it's a floor, not a promise — the phase needs comfortably more "
+        "overlap than the bare count to settle"
         if _m >= _u else
-        "**under-determined** — fewer measurements than unknowns; "
-        "the phase can't be pinned down, so the high-res detail stays lost"
+        "**under-determined** — fewer measurements than unknowns; the phase "
+        "cannot be pinned down at all"
     )
     t4_why = mo.vstack([
         t4_why_fig,
@@ -1533,23 +1544,47 @@ def _t4_payoff_plot(
     np,
     plt,
     show_fig,
+    t4_amp_gt,
+    t4_obj,
     t4_overlap,
+    t4_phi_gt,
     t4_recovered,
-    t4_star,
 ):
-    _N = t4_star.shape[0]
-    _obj_only = np.abs(ift(make_pupil(_N, T4_R_OBJ) * ft(t4_star)))
-    _fig, _ax = plt.subplots(1, 3, figsize=(10.5, 3.7), constrained_layout=True)
-    for _a, _im, _t in [
-        (_ax[0], t4_star, "target (ground truth)"),
-        (_ax[1], _obj_only, "bare objective\n(low resolution)"),
-        (_ax[2], np.abs(t4_recovered),
-         f"FPM reconstruction\n(overlap ≈ {t4_overlap:.0%})"),
-    ]:
-        _a.imshow(_im, cmap="gray")
-        _a.set_title(_t, fontsize=9)
+    _N = t4_amp_gt.shape[0]
+    _bare = np.abs(ift(make_pupil(_N, T4_R_OBJ) * ft(t4_obj)))
+    # Align recovered global phase to the truth for a fair phase comparison.
+    _rec = t4_recovered * np.exp(
+        -1j * np.angle(np.sum(t4_recovered * np.conj(t4_obj))))
+
+    def _phase_rgba(field):
+        _mag = np.abs(field)
+        _cmap = plt.get_cmap("twilight")
+        _rgba = _cmap((np.angle(field) + np.pi) / (2 * np.pi))
+        _rgba[..., 3] = np.clip((_mag / (_mag.max() + 1e-12)) ** 0.6, 0, 1)
+        return _rgba
+
+    _fig, _ax = plt.subplots(2, 3, figsize=(9.6, 6.5), constrained_layout=True)
+    _ax[0, 0].imshow(t4_amp_gt, cmap="gray", vmin=0, vmax=1.1)
+    _ax[0, 1].imshow(np.abs(_rec), cmap="gray", vmin=0, vmax=1.1)
+    _ax[0, 2].imshow(_bare, cmap="gray")
+    _ax[1, 0].imshow(_phase_rgba(t4_obj))
+    _ax[1, 1].imshow(_phase_rgba(_rec))
+    _ax[1, 2].text(0.5, 0.5,
+                   "a conventional microscope\nrecords no phase at all —\n"
+                   "recovering this channel is\nthe whole point of FPM",
+                   ha="center", va="center", fontsize=8.5, style="italic",
+                   transform=_ax[1, 2].transAxes)
+
+    for _j, _t in enumerate(["ground truth",
+                             f"FPM recovered  (overlap ≈ {t4_overlap:.0%})",
+                             "conventional microscope"]):
+        _ax[0, _j].set_title(_t, fontsize=9)
+    _ax[0, 0].set_ylabel("amplitude\n(resolution)", fontsize=9)
+    _ax[1, 0].set_ylabel("phase\n(the hard part)", fontsize=9)
+    for _a in _ax.ravel():
         _a.set_xticks([])
         _a.set_yticks([])
+    _ax[1, 2].axis("off")
     t4_payoff = show_fig(_fig)
     return (t4_payoff,)
 
@@ -1568,25 +1603,34 @@ def _t4_assembly(mo, t4_controls, t4_payoff, t4_why):
             "side and you still can't stitch them — the phase that aligns one "
             "disk to the next is missing. The fix is **overlap**: make "
             "neighbouring measurements share spectral territory. Those shared, "
-            "redundant measurements **over-determine** the problem just enough to "
+            "redundant measurements **over-determine** the problem enough to "
             "**solve for the phase you never recorded** — and the recovered "
             "phase is what fuses the disks into one large synthetic aperture. "
-            "That is where the extra **resolution** comes from."
+            "That is where the extra **resolution** comes from.\n\n"
+            "The target below is a mixed object — a resolution star in "
+            "**amplitude** and a second star hidden in **phase**, like the real "
+            "samples the lab images."
         ),
         t4_controls,
         mo.md("### Why it works — the redundancy that pays for phase"),
         t4_why,
-        mo.md("### What it buys — resolution"),
+        mo.md("### What it buys — resolution (and the phase you couldn't see)"),
         t4_payoff,
         mo.md(
-            "**Predict, then slide.** With the fewest LEDs the windows barely "
-            "overlap: the problem is under-determined, the phase can't be "
-            "recovered, and the fine spokes near the centre stay blurred — no "
-            "better than the bare objective. Add LEDs (push the overlap past "
-            "~half): the phase locks, the synthetic aperture fills in, and the "
-            "spokes sharpen toward the centre. **Same field of view, more "
-            "resolution — bought entirely with overlap.** *(In practice ~60% "
-            "overlap is the standard operating point.)*"
+            "**Predict, then slide — and watch the two channels separately.** "
+            "With the fewest LEDs the windows barely overlap: the problem is "
+            "under-determined and both channels are junk. Add LEDs and the "
+            "**amplitude** sharpens first — the spokes resolve toward the "
+            "centre, the resolution gain your microscope was after. The "
+            "**phase** lags: right around where the counter flips to "
+            "*over-determined* (~40% overlap) it's only a faint, unstable "
+            "ghost, and it doesn't settle until the overlap is comfortably "
+            "higher (~60%). That gap is the lesson: **more knowns than unknowns "
+            "is necessary, not sufficient** — phase retrieval is a hard, "
+            "non-convex problem, and overlap has to buy not just coverage but "
+            "the redundancy that makes solving for phase *stable*. Same field "
+            "of view, more resolution, and a whole channel of information a "
+            "conventional microscope never records — all bought with overlap."
         ),
     ])
     return (tab4,)

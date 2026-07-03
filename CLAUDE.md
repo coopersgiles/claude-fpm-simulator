@@ -72,17 +72,22 @@ Rebuilt to teach the phase-retrieval insight, not to be another reconstruction
 stepper. One slider (`t4_nside`, LEDs across a fixed-aperture array) drives
 everything reactively — **no `mo.state`, no buttons** (the old click-counter
 stepper is gone). Pipeline of pure cells: `_t4_config` (geometry constants
-`T4_*`) → `_t4_target` (a Siemens-star resolution target) → `_t4_setup` (LED
-grid, overlap %, noisy measurements, k-space redundancy map, constraint counts)
-→ `_t4_recon` (alternating-projection recovery, reruns on slider change) →
-`_t4_why_plot` (redundancy map + measurements-vs-unknowns bar; phase doubles the
-unknowns, overlap supplies them) → `_t4_payoff_plot` (target | bare objective |
-FPM recon — spokes sharpen only when overlap is high enough) → `_t4_assembly`.
-Physics is tuned (`R_OBJ=11`, `R_SYNTH=37`, `~7` iters, mild shot noise) so the
-under-→over-determined transition is visible around ~40–60% overlap. Reuses the
-shared `simulate_intensity`/`ft`/`ift`/`make_pupil`. Note `_t4_groundtruth`
-(`make_ground_truth`) and `_t4_geometry` (`PUPIL_CUTOFF_PX`, `LED_GRID_SIDE`) sit
-just above and are **shared with Tab 5** — don't delete them.
+`T4_*`) → `_t4_target` (a **compact mixed object**: a Siemens star in
+*amplitude* = the resolution target, plus a rotated star in *phase* = the hard,
+hidden channel) → `_t4_setup` (LED grid, overlap %, noisy measurements, k-space
+redundancy map, constraint counts) → `_t4_recon` (alternating-projection
+recovery, reruns on slider change) → `_t4_why_plot` (redundancy map +
+measurements-vs-unknowns bar; phase doubles the unknowns, overlap supplies them)
+→ `_t4_payoff_plot` (2×3: amplitude/phase rows × ground-truth / FPM-recovered /
+conventional-microscope columns; phase is alpha-masked by magnitude) →
+`_t4_assembly`. Physics is tuned (`R_OBJ=11`, `R_SYNTH=37`, `~10` iters, mild
+shot noise) so **amplitude resolves ~50% overlap while phase visibly lags and
+only settles ~60%** — the honest point that "more knowns than unknowns" is
+necessary but *not* sufficient (phase retrieval is nonconvex; overlap must buy
+stability, not just coverage). The counting panel is framed as a floor, not a
+promise. Reuses the shared `simulate_intensity`/`ft`/`ift`/`make_pupil`. Note
+`_t4_groundtruth` (`make_ground_truth`) and `_t4_geometry` (`PUPIL_CUTOFF_PX`,
+`LED_GRID_SIDE`) sit just above and are **shared with Tab 5** — don't delete them.
 
 Gotcha: `marimo export html` (the non-WASM static snapshot) can silently reuse a
 stale `__marimo__/session/*.json` cache and emit a code-only file with no
